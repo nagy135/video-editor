@@ -12,7 +12,7 @@ cd video-editor
 ./scripts/install.sh
 ```
 
-This builds and installs `/Applications/Video Editor.app`. It does not launch the app. Close the editor before updating. Local builds are ad-hoc signed by default; set `SIGNING_IDENTITY` to use an existing certificate. Downloaded builds may need Developer ID signing and notarization for distribution; building locally is supported.
+This builds and installs `/Applications/Video Editor.app` with its own filmstrip-and-speed-curve icon. It does not launch the app. Close the editor before updating. Local builds are ad-hoc signed by default; set `SIGNING_IDENTITY` to use an existing certificate. Downloaded builds may need Developer ID signing and notarization for distribution; building locally is supported.
 
 ## Open a video
 
@@ -20,7 +20,7 @@ This builds and installs `/Applications/Video Editor.app`. It does not launch th
 "/Applications/Video Editor.app/Contents/MacOS/VideoEditor" "/path/to/video.mp4"
 ```
 
-A bare path is the normal command-line interface. `--edit-video /path/to/video.mp4` also works. Multiple paths open multiple windows; no arguments opens a file picker. Use ⌘O to open another clip, ⌘W to close a window, and ⌘Q to quit.
+A bare path is the normal command-line interface. `--edit-video /path/to/video.mp4` also works. Multiple paths open multiple windows. Launching the app from Applications or running it without arguments opens a start window: drop a video anywhere in it, click **Open Video…** (or the background) for the Finder picker, or click **Paste** / press ⌘V. Paste accepts videos copied in Finder, local file paths (including spaces and `~`), and `file://` URLs. The app also appears in Finder’s **Open With** menu for videos. Closing the last editor returns to the start window. Use ⌘O to open another clip, ⌘W to close a window, and ⌘Q to quit.
 
 Other apps can locate bundle identifier `com.nagy135.video-editor` with `NSWorkspace` and launch it using `NSWorkspace.OpenConfiguration.arguments = [video.path]`. Use `createsNewApplicationInstance = true` to pass new command-line arguments even when an editor is already open. [Mac Screen Recorder](https://github.com/nagy135/mac-screen-recorder) uses this interface for its ⌘⌥⇧T shortcut.
 

@@ -42,6 +42,9 @@ public struct VideoEdit: Equatable, Sendable {
     public var end: Double
     public var points: [SpeedPoint]
     public var cuts: [VideoCut]
+    public var audioVolume: Float = 1
+    public var audioMuted = true
+    public var effectiveAudioVolume: Float { audioMuted ? 0 : min(1, max(0, audioVolume)) }
 
     public init(duration: Double) {
         self.duration = max(0, duration)

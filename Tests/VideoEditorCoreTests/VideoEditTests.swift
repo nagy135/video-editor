@@ -28,6 +28,8 @@ import Testing
     #expect(SpeedPoint(time: 0, speed: 0).speed == 1)
 }
 
+@Suite(.serialized)
+struct MediaExportTests {
 @Test(.enabled(if: ProcessInfo.processInfo.environment["VIDEO_EDITOR_TEST_FIXTURE"] != nil))
 @MainActor func realVideoAndAudioExportMatchesDuration() async throws {
     let input = URL(fileURLWithPath: ProcessInfo.processInfo.environment["VIDEO_EDITOR_TEST_FIXTURE"]!)
@@ -35,6 +37,7 @@ import Testing
     let sourceAudioCount = try await AVURLAsset(url: input).loadTracks(withMediaType: .audio).count
     for mode in 0..<4 {
         var edit = VideoEdit(duration: 6)
+        edit.audioMuted = false
         edit.start = 0.5
         edit.end = 5.5
         edit.points = mode >= 2
@@ -58,6 +61,8 @@ import Testing
         #expect(try Data(contentsOf: output).count > 1000)
     }
     #expect(try Data(contentsOf: input) == original)
+}
+
 }
 
 @Test func overlappingCutsRemoveTheirUnionAndUndoIndividually() {

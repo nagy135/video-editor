@@ -14,5 +14,5 @@ ffmpeg -hide_banner -loglevel error -y -i "$fixture_directory/audio.mp4" \
     -itsoffset 0.7 -i "$fixture_directory/audio.mp4" \
     -map 0:v -map 1:a -c copy "$fixture_directory/delayed-audio.mp4"
 for fixture in audio silent delayed-audio; do
-    VIDEO_EDITOR_TEST_FIXTURE="$fixture_directory/$fixture.mp4" swift test
+    VIDEO_EDITOR_TEST_FIXTURE="$fixture_directory/$fixture.mp4" swift test --no-parallel
 done

@@ -2,10 +2,12 @@ import AVFoundation
 
 @MainActor
 public enum VideoEditorMedia {
-    public static func composition(url: URL, edit: VideoEdit) async throws -> AVMutableComposition {
+    public static func composition(url: URL, edit: VideoEdit, includeAudio: Bool = true) async throws -> AVMutableComposition {
         let asset = AVURLAsset(url: url)
         let composition = AVMutableComposition()
-        let tracks = try await asset.loadTracks(withMediaType: .video) + asset.loadTracks(withMediaType: .audio)
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        let audioTracks = includeAudio ? try await asset.loadTracks(withMediaType: .audio) : []
+        let tracks = videoTracks + audioTracks
         let segments = edit.segments
         for source in tracks {
             try Task.checkCancellation()
@@ -44,7 +46,7 @@ public enum VideoEditorMedia {
 
     public static func export(url: URL, edit: VideoEdit, to destination: URL,
                        sessionReady: (AVAssetExportSession) -> Void) async throws {
-        let composition = try await composition(url: url, edit: edit)
+        let composition = try await composition(url: url, edit: edit, includeAudio: edit.effectiveAudioVolume > 0)
         guard let session = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
             throw CocoaError(.fileWriteUnknown)
         }
@@ -67,6 +69,15 @@ public enum VideoEditorMedia {
         videoComposition.instructions = [instruction]
         session.videoComposition = videoComposition
         session.timeRange = CMTimeRange(start: .zero, duration: CMTime(seconds: edit.outputDuration, preferredTimescale: 60000))
+        if edit.effectiveAudioVolume > 0, edit.effectiveAudioVolume < 1 {
+            let mix = AVMutableAudioMix()
+            mix.inputParameters = composition.tracks(withMediaType: .audio).map { track in
+                let parameters = AVMutableAudioMixInputParameters(track: track)
+                parameters.setVolume(edit.effectiveAudioVolume, at: .zero)
+                return parameters
+            }
+            session.audioMix = mix
+        }
         session.audioTimePitchAlgorithm = .varispeed
         sessionReady(session)
         try Task.checkCancellation()

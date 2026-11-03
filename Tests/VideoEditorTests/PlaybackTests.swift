@@ -57,7 +57,7 @@ struct PlaybackTests {
         #expect(model.player.rate == 0)
         model.playFromStart()
         try await waitUntil { model.player.rate > 0 }
-        #expect(abs(model.player.currentItem!.duration.seconds - 5) < 0.001)
+        #expect(abs(model.player.currentItem!.duration.seconds - (model.edit.duration - 1)) < 0.001)
     }
 
     @Test func playFromStartRestartsAtFirstRetainedFrameAndPauseStaysPaused() async throws {
@@ -75,7 +75,7 @@ struct PlaybackTests {
         #expect(model.playing)
         model.pause()
         model.seek(3)
-        try await waitUntil { abs(model.player.currentTime().seconds - 3) < 0.01 }
+        try await waitUntil { abs(model.player.currentTime().seconds - 3) < 0.01 && model.player.rate == 0 }
         #expect(!model.playing)
         #expect(model.player.rate == 0)
     }

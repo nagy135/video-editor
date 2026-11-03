@@ -41,6 +41,7 @@ final class VideoEditorModel: ObservableObject {
     @Published var position = 0.0
     @Published var playing = false
     @Published var selected: UUID?
+    @Published var selectedCut: UUID?
     @Published var zoomResetToken = 0
     @Published var viewportZoomed = false
     @Published var sizeText = "Calculating…"
@@ -49,9 +50,16 @@ final class VideoEditorModel: ObservableObject {
     @Published var saving = false
     @Published var renderedURL: URL?
     @Published var thumbnails: [NSImage] = []
+    private var playbackTask: Task<Void, Never>?
+    private var sourceItem: AVPlayerItem?
+    private var playbackEdit: VideoEdit?
+    private var preparedEdit: VideoEdit?
+    private var preparedComposition: AVMutableComposition?
+    private var itemGeneration = 0
     private var renderTask: Task<Void, Never>?
     private var exportSession: AVAssetExportSession?
     private var observer: Any?
+    private var endObserver: NSObjectProtocol?
     private var generation = 0
     private var seeking = false
     private var pendingSeek: Double?
@@ -68,8 +76,8 @@ final class VideoEditorModel: ObservableObject {
             guard !closed else { return }
             edit = VideoEdit(duration: duration)
             let item = AVPlayerItem(asset: asset)
-            item.audioTimePitchAlgorithm = .varispeed
-            player.replaceCurrentItem(with: item)
+            sourceItem = item
+            installPlayerItem(item, edit: nil)
             observer = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 30), queue: .main) { [weak self] time in
                 Task { @MainActor in self?.tick(time.seconds) }
             }
@@ -87,27 +95,98 @@ final class VideoEditorModel: ObservableObject {
         } catch { self.error = error.localizedDescription; loading = false }
     }
 
-    private func tick(_ time: Double) {
-        guard !seeking, pendingSeek == nil else { return }
-        if playing {
-            if time >= edit.end { pause(); seek(edit.start); return }
-            position = max(edit.start, time)
-            player.rate = Float(edit.speed(at: position))
+    private func installPlayerItem(_ item: AVPlayerItem, edit: VideoEdit?) {
+        itemGeneration += 1
+        let version = itemGeneration
+        seeking = false
+        pendingSeek = nil
+        playbackEdit = edit
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        item.audioTimePitchAlgorithm = .varispeed
+        player.replaceCurrentItem(with: item)
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.playing, !self.closed, self.itemGeneration == version else { return }
+                self.finishPlayback()
+            }
         }
+    }
+
+    private func finishPlayback() {
+        let end = playbackEdit?.retainedRanges.last?.upperBound ?? edit.end
+        pause()
+        position = end
+    }
+
+    private func tick(_ time: Double) {
+        guard playing, !seeking, pendingSeek == nil, let playbackEdit else { return }
+        position = playbackEdit.sourceTime(atPlaybackTime: time)
+        // The composition plays through joins itself. No seek, item replacement,
+        // or rate restart is performed when the source playhead crosses a cut.
+        let rate = Float(edit.speed(at: position))
+        if player.rate != rate { player.rate = rate }
     }
 
     func togglePlayback() {
-        if playing { pause() } else {
-            if position < edit.start || position >= edit.end { seek(edit.start) }
-            playing = true
-            player.playImmediately(atRate: Float(edit.speed(at: max(edit.start, position))))
+        if playing { pause() }
+        else { startPlayback(at: position) }
+    }
+
+    func playFromStart() {
+        guard let first = edit.retainedRanges.first else { return }
+        startPlayback(at: first.lowerBound)
+    }
+
+    private func startPlayback(at sourceTime: Double) {
+        guard !loading, !saving, let first = edit.retainedRanges.first else { return }
+        pause()
+        playing = true
+        let target = edit.nextPlayableTime(at: sourceTime) ?? first.lowerBound
+        var snapshot = edit
+        snapshot.points = [] // Speed is applied live; only trim/cuts belong in the composition.
+        playbackTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let composition: AVMutableComposition
+                if preparedEdit == snapshot, let cached = preparedComposition {
+                    composition = cached
+                } else {
+                    composition = try await VideoEditorMedia.composition(url: url, edit: snapshot)
+                }
+                try Task.checkCancellation()
+                guard playing, !closed else { return }
+                preparedEdit = snapshot
+                preparedComposition = composition
+                installPlayerItem(AVPlayerItem(asset: composition), edit: snapshot)
+                seek(target)
+            } catch {
+                guard !Task.isCancelled, !closed else { return }
+                pause()
+                self.error = "Could not prepare playback: \(error.localizedDescription)"
+            }
         }
     }
 
-    func pause() { playing = false; player.pause() }
+    private func resumePlayback() {
+        guard playing, !closed, playbackEdit != nil else { return }
+        player.playImmediately(atRate: Float(edit.speed(at: position)))
+    }
+
+    func pause() {
+        playing = false
+        player.pause()
+        playbackTask?.cancel()
+        playbackTask = nil
+    }
 
     /// Chase the newest drag position, never queue stale seeks behind the mouse.
     func seek(_ time: Double) {
+        // Scrubbing must still show source frames inside removed ranges.
+        if !playing, playbackEdit != nil, let sourceItem {
+            installPlayerItem(sourceItem, edit: nil)
+        }
         position = min(edit.end, max(edit.start, time))
         pendingSeek = position
         chaseSeek()
@@ -117,11 +196,15 @@ final class VideoEditorModel: ObservableObject {
         guard !seeking, let target = pendingSeek else { return }
         seeking = true
         pendingSeek = nil
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 60000), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+        let version = itemGeneration
+        let itemTime = playbackEdit?.playbackTime(atSourceTime: target) ?? target
+        let targetTime = CMTime(value: Int64(ceil(itemTime * 60000)), timescale: 60000)
+        player.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             Task { @MainActor in
-                guard let self, !self.closed else { return }
+                guard let self, !self.closed, self.itemGeneration == version else { return }
                 self.seeking = false
-                self.chaseSeek()
+                if self.pendingSeek != nil { self.chaseSeek() }
+                else { self.resumePlayback() }
             }
         }
     }
@@ -139,6 +222,9 @@ final class VideoEditorModel: ObservableObject {
     }
 
     func changed() {
+        // A reset or toolbar edit may arrive while a preview is being prepared.
+        // Cancel it so an obsolete composition cannot start after the edit.
+        pause()
         updateDuration()
         if position < edit.start || position > edit.end { seek(min(edit.end, max(edit.start, position))) }
         generation += 1
@@ -150,6 +236,10 @@ final class VideoEditorModel: ObservableObject {
         renderedURL = nil
         sizeText = "Calculating…"
         error = nil
+        guard !edit.retainedRanges.isEmpty else {
+            sizeText = "No video remaining"
+            return
+        }
         let snapshot = edit
         let target = FileManager.default.temporaryDirectory.appendingPathComponent("video-editor-\(UUID().uuidString).mp4")
         renderTask = Task { [weak self] in
@@ -175,6 +265,32 @@ final class VideoEditorModel: ObservableObject {
                 }
             }
         }
+    }
+
+    func addCut() {
+        guard !loading, !saving, edit.end > edit.start else { return }
+        pause()
+        let split = min(edit.end, max(edit.start, position))
+        guard split > edit.start, split < edit.end else { return }
+        if let existing = edit.cuts.first(where: { abs($0.split - split) < 0.001 }) {
+            selectedCut = existing.id
+            selected = nil
+            return
+        }
+        let cut = VideoCut(start: split, end: split)
+        edit.cuts.append(cut)
+        selectedCut = cut.id
+        selected = nil
+        changed()
+    }
+
+    func undoCut() {
+        guard !loading, !saving, !edit.cuts.isEmpty else { return }
+        pause()
+        let id = selectedCut ?? edit.cuts.last!.id
+        edit.cuts.removeAll { $0.id == id }
+        selectedCut = nil
+        changed()
     }
 
     func removePoint() {
@@ -216,7 +332,12 @@ final class VideoEditorModel: ObservableObject {
         exportSession?.cancelExport()
         if let observer { player.removeTimeObserver(observer) }
         observer = nil
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        endObserver = nil
+        itemGeneration += 1
         player.replaceCurrentItem(with: nil)
+        sourceItem = nil
+        preparedComposition = nil
         if let renderedURL { try? FileManager.default.removeItem(at: renderedURL) }
     }
 }
@@ -279,20 +400,37 @@ private struct VideoEditorView: View {
                         Text(model.sizeText).monospacedDigit()
                             .help("Edited file size")
                     }
-                    Button(action: model.togglePlayback) {
-                        Image(systemName: model.playing ? "pause.fill" : "play.fill")
-                            .font(.system(size: 28, weight: .semibold))
-                            .offset(x: model.playing ? 0 : 2)
-                            .frame(width: 64, height: 56)
-                            .contentShape(Rectangle())
+                    HStack(spacing: 10) {
+                        Button(action: model.playFromStart) {
+                            Image(systemName: "backward.end.fill")
+                                .font(.system(size: 15, weight: .semibold))
+                                .frame(width: 34, height: 34)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                        .accessibilityLabel("Play from start")
+                        .help("Play from the beginning of the edited video")
+                        .modifier(EditorClickCursor())
+                        .disabled(model.loading || model.saving || model.edit.retainedRanges.isEmpty)
+                        Button(action: model.togglePlayback) {
+                            Image(systemName: model.playing ? "pause.fill" : "play.fill")
+                                .font(.system(size: 28, weight: .semibold))
+                                .offset(x: model.playing ? 0 : 2)
+                                .frame(width: 64, height: 56)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+                        .accessibilityLabel(model.playing ? "Pause" : "Play")
+                        .help(model.playing ? "Pause (Space)" : "Play (Space)")
+                        .keyboardShortcut(.space, modifiers: [])
+                        .modifier(EditorClickCursor())
+                        .disabled(model.loading)
+                        Color.clear.frame(width: 34, height: 34)
+                            .accessibilityHidden(true)
+                            .allowsHitTesting(false)
                     }
-                    .buttonStyle(.plain)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
-                    .accessibilityLabel(model.playing ? "Pause" : "Play")
-                    .help(model.playing ? "Pause (Space)" : "Play (Space)")
-                    .keyboardShortcut(.space, modifiers: [])
-                    .modifier(EditorClickCursor())
-                    .disabled(model.loading)
                 }
                 EditorTimeline(model: model).frame(height: 208)
                 if let error = model.error {
@@ -302,6 +440,21 @@ private struct VideoEditorView: View {
                     }
                 }
                 HStack(spacing: 12) {
+                    Button(action: model.addCut) {
+                        Label("Add Cut", systemImage: "scissors")
+                    }
+                    .keyboardShortcut("c", modifiers: [])
+                    .help("Split the blue filmstrip at the playhead (C). Drag the handles apart to trim.")
+                    .modifier(EditorClickCursor())
+                    .disabled(model.loading || model.saving)
+                    Button(action: model.undoCut) {
+                        Image(systemName: "arrow.uturn.backward")
+                    }
+                    .keyboardShortcut("u", modifiers: [])
+                    .accessibilityLabel("Undo cut")
+                    .help("Restore the selected cut, or the latest cut (U)")
+                    .modifier(EditorClickCursor())
+                    .disabled(model.loading || model.saving || model.edit.cuts.isEmpty)
                     if let point = model.edit.points.first(where: { $0.id == model.selected }) {
                         Text(String(format: "%.3f×", point.speed)).monospacedDigit()
                         Button(action: model.removePoint) {
@@ -325,6 +478,7 @@ private struct VideoEditorView: View {
                     Button {
                         model.edit = VideoEdit(duration: model.edit.duration)
                         model.selected = nil
+                        model.selectedCut = nil
                         model.changed()
                     } label: {
                         Image(systemName: "arrow.counterclockwise")

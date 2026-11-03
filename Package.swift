@@ -9,5 +9,6 @@ let package = Package(
         .target(name: "VideoEditorCore"),
         .executableTarget(name: "VideoEditor", dependencies: ["VideoEditorCore"]),
         .testTarget(name: "VideoEditorCoreTests", dependencies: ["VideoEditorCore"]),
+        .testTarget(name: "VideoEditorTests", dependencies: ["VideoEditor", "VideoEditorCore"]),
     ]
 )

@@ -4,9 +4,16 @@ import VideoEditorCore
 @MainActor
 final class VideoTimelineView: NSView {
     private let model: VideoEditorModel
-    private enum Drag { case start, end, scrub, point(UUID) }
+    private enum Drag { case start, end, scrub, point(UUID), cutStart(UUID), cutEnd(UUID), cutMove(UUID, Double, Double, Double) }
     private var drag: Drag?
     private var edited = false
+    private var cutDragOffset = 0.0
+    // Put the two handles inside their respective clips so an untouched split
+    // exposes both handles without deleting any source frames.
+    private func cutHandle(_ cut: VideoCut, left: Bool) -> NSRect {
+        NSRect(x: left ? x(cut.start) - 10 : x(cut.end) + 1,
+               y: strip.minY - 3, width: 9, height: strip.height + 6)
+    }
     private var cursorTracking: NSTrackingArea?
     private var speedSpan = 9.0
     private var timeZoom = 1.0
@@ -24,14 +31,14 @@ final class VideoTimelineView: NSView {
         self.model = model
         super.init(frame: .zero)
         setAccessibilityElement(true)
-        setAccessibilityLabel("Speed curve and trim timeline")
+        setAccessibilityLabel("Speed curve, trim and cut timeline")
         timeScroller.controlSize = .small
         timeScroller.scrollerStyle = .legacy
         timeScroller.target = self
         timeScroller.action = #selector(scrollTime)
         timeScroller.isHidden = true
         addSubview(timeScroller)
-        toolTip = "Scroll over the graph to zoom toward 1×; scroll over the filmstrip to zoom in time. Scroll sideways or use the scrollbar to pan. Click above the filmstrip to add speed points from 1× to 10×. Drag filmstrip ends to trim; drag inside to scrub."
+        toolTip = "Scroll over the graph to zoom toward 1×; scroll over the filmstrip to zoom in time. Scroll sideways or use the scrollbar to pan. Click above the filmstrip to add speed points from 1× to 10×. Drag filmstrip ends to trim; drag inside to scrub. Press C to split the blue filmstrip. Drag the left handle left or the right handle right to trim away from the split; U restores the selected cut."
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -57,7 +64,7 @@ final class VideoTimelineView: NSView {
     }
 
     private func updateScroller() {
-        let frame = NSRect(x: strip.minX, y: 192, width: strip.width, height: 12)
+        let frame = NSRect(x: strip.minX, y: strip.maxY + 8, width: strip.width, height: 12)
         if timeScroller.frame != frame { timeScroller.frame = frame }
         let hidden = timeZoom <= 1
         if timeScroller.isHidden != hidden { timeScroller.isHidden = hidden }
@@ -132,6 +139,17 @@ final class VideoTimelineView: NSView {
             }
             return nil // Empty graph space creates a point.
         }
+        guard p.y >= strip.minY - 4, p.y <= strip.maxY + 4 else { return nil }
+        let cuts = model.edit.cuts.sorted {
+            ($0.id == model.selectedCut ? 1 : 0) < ($1.id == model.selectedCut ? 1 : 0)
+        }
+        for cut in cuts.reversed() {
+            if cutHandle(cut, left: true).contains(p) { return .cutStart(cut.id) }
+            if cutHandle(cut, left: false).contains(p) { return .cutEnd(cut.id) }
+            if p.x >= x(cut.start), p.x <= x(cut.end) {
+                return .cutMove(cut.id, time(p.x), cut.start, cut.end)
+            }
+        }
         if abs(p.x - x(model.edit.start)) < 12 { return .start }
         if abs(p.x - x(model.edit.end)) < 12 { return .end }
         return .scrub
@@ -141,15 +159,15 @@ final class VideoTimelineView: NSView {
         guard !model.loading, !model.saving, model.edit.duration > 0 else { NSCursor.arrow.set(); return }
         if let drag {
             switch drag {
-            case .start, .end: NSCursor.resizeLeftRight.set()
-            case .point, .scrub: NSCursor.closedHand.set()
+            case .start, .end, .cutStart, .cutEnd: NSCursor.resizeLeftRight.set()
+            case .point, .scrub, .cutMove: NSCursor.closedHand.set()
             }
             return
         }
         guard bounds.contains(p) else { NSCursor.arrow.set(); return }
         switch interaction(at: p) {
-        case .start, .end: NSCursor.resizeLeftRight.set()
-        case .point, .scrub: NSCursor.openHand.set()
+        case .start, .end, .cutStart, .cutEnd: NSCursor.resizeLeftRight.set()
+        case .point, .scrub, .cutMove: NSCursor.openHand.set()
         case nil: NSCursor.crosshair.set()
         }
     }
@@ -226,11 +244,33 @@ final class VideoTimelineView: NSView {
         NSColor.black.withAlphaComponent(0.65).setFill()
         NSRect(x: strip.minX, y: strip.minY, width: max(0, min(strip.width, x(model.edit.start) - strip.minX)), height: strip.height).fill()
         NSRect(x: max(strip.minX, x(model.edit.end)), y: strip.minY, width: max(0, strip.maxX - max(strip.minX, x(model.edit.end))), height: strip.height).fill()
-        let selected = NSRect(x: x(model.edit.start), y: strip.minY, width: x(model.edit.end) - x(model.edit.start), height: strip.height)
-        NSColor.controlAccentColor.setStroke()
-        let border = NSBezierPath(rect: selected)
-        border.lineWidth = 2
-        border.stroke()
+        // Outline each remaining piece of the original blue bar separately.
+        // A fresh zero-width cut is a visible seam, not an excluded range.
+        for range in model.edit.retainedRanges {
+            let rect = NSRect(x: x(range.lowerBound), y: strip.minY,
+                              width: x(range.upperBound) - x(range.lowerBound), height: strip.height)
+            NSColor.controlAccentColor.setStroke()
+            let border = NSBezierPath(rect: rect)
+            border.lineWidth = 2
+            border.stroke()
+        }
+        for cut in model.edit.cuts {
+            let gap = NSRect(x: x(cut.start) - 1, y: strip.minY - 3,
+                             width: max(2, x(cut.end) - x(cut.start) + 2), height: strip.height + 6)
+            NSColor.windowBackgroundColor.setFill()
+            gap.fill()
+            for left in [true, false] {
+                let handle = cutHandle(cut, left: left)
+                NSColor.controlAccentColor.setFill()
+                NSBezierPath(roundedRect: handle, xRadius: 2, yRadius: 2).fill()
+                if cut.id == model.selectedCut {
+                    NSColor.labelColor.setStroke()
+                    NSBezierPath(roundedRect: handle.insetBy(dx: 0.5, dy: 0.5), xRadius: 2, yRadius: 2).stroke()
+                }
+                NSColor.white.setFill()
+                NSRect(x: handle.midX - 0.5, y: strip.midY - 6, width: 1, height: 12).fill()
+            }
+        }
         for t in [model.edit.start, model.edit.end] {
             let handle = NSRect(x: x(t) - 5, y: strip.minY - 3, width: 10, height: strip.height + 6)
             NSColor.controlAccentColor.setFill()
@@ -260,23 +300,42 @@ final class VideoTimelineView: NSView {
         model.pause()
         let p = convert(event.locationInWindow, from: nil)
         edited = false
+        cutDragOffset = 0
         if p.y < 132 {
             if case .point(let id) = interaction(at: p) {
+                model.selectedCut = nil
                 model.selected = id
                 drag = .point(id)
             } else if let point = model.edit.points.first(where: { abs($0.time - time(p.x)) < 0.002 }) {
                 // Reuse a point at this time even when it is above the zoomed
                 // speed range, rather than introducing coincident points.
+                model.selectedCut = nil
                 model.selected = point.id
                 drag = .point(point.id)
             } else {
                 let point = SpeedPoint(time: time(p.x), speed: speed(p.y))
                 model.edit.points.append(point)
+                model.selectedCut = nil
                 model.selected = point.id
                 drag = .point(point.id)
                 edited = true
             }
-        } else { drag = interaction(at: p) }
+        } else {
+            drag = interaction(at: p)
+            switch drag {
+            case .cutStart(let id), .cutEnd(let id), .cutMove(let id, _, _, _):
+                model.selectedCut = id
+                model.selected = nil
+                if let cut = model.edit.cuts.first(where: { $0.id == id }) {
+                    switch drag {
+                    case .cutStart: cutDragOffset = time(p.x) - cut.start
+                    case .cutEnd: cutDragOffset = time(p.x) - cut.end
+                    default: break
+                    }
+                }
+            default: model.selectedCut = nil
+            }
+        }
         apply(p)
         updateCursor(at: p)
     }
@@ -313,6 +372,23 @@ final class VideoTimelineView: NSView {
                 model.edit.points[index].time = min(upper, max(lower, t))
                 model.edit.points[index].speed = speed(p.y)
                 model.seek(model.edit.points[index].time)
+                edited = true
+            }
+        case .cutStart(let id), .cutEnd(let id), .cutMove(let id, _, _, _):
+            if let index = model.edit.cuts.firstIndex(where: { $0.id == id }) {
+                switch drag {
+                case .cutStart:
+                    model.edit.cuts[index].trimLeft(to: t - cutDragOffset, duration: model.edit.duration)
+                case .cutEnd:
+                    model.edit.cuts[index].trimRight(to: t - cutDragOffset, duration: model.edit.duration)
+                case .cutMove(_, let anchor, let start, let end):
+                    let delta = min(model.edit.duration - end, max(-start, t - anchor))
+                    let splitOffset = model.edit.cuts[index].split - model.edit.cuts[index].start
+                    model.edit.cuts[index].start = start + delta
+                    model.edit.cuts[index].end = end + delta
+                    model.edit.cuts[index].split = start + delta + splitOffset
+                default: break
+                }
                 edited = true
             }
         case nil: break

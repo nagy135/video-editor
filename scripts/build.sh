@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+configuration="${CONFIGURATION:-release}"
+swift build -c "$configuration"
+binary_directory="$(swift build -c "$configuration" --show-bin-path)"
+app="$(pwd)/dist/Video Editor.app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+cp "$binary_directory/VideoEditor" "$app/Contents/MacOS/VideoEditor"
+cp Resources/Info.plist "$app/Contents/Info.plist"
+plutil -lint "$app/Contents/Info.plist"
+codesign --force --sign "${SIGNING_IDENTITY:--}" --identifier com.nagy135.video-editor "$app"
+codesign --verify --strict "$app"
+printf '\nBuilt %s\n' "$app"

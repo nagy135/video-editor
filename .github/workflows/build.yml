@@ -1,0 +1,26 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: swift test
+      - name: Install media fixture generator
+        run: brew install ffmpeg
+      - name: Test real media exports
+        run: ./scripts/test-video-editor.sh
+      - name: Build app
+        run: ./scripts/build.sh
+      - name: Zip app
+        run: ditto -c -k --sequesterRsrc --keepParent 'dist/Video Editor.app' dist/Video-Editor.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Video-Editor
+          path: dist/Video-Editor.zip
+          if-no-files-found: error
